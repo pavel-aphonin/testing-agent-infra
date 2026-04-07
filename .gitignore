@@ -1,0 +1,17 @@
+# Env
+.env
+.env.local
+.env.*.local
+
+# Generated configs
+llama-swap.yaml
+
+# Volume data (never committed)
+data/
+volumes/
+
+# macOS
+.DS_Store
+
+# Logs
+*.log
