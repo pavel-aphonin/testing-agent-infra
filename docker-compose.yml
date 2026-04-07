@@ -1,0 +1,124 @@
+# Testing Agent — docker-compose for local development
+#
+# Expects sibling repos cloned at:
+#   ../testing-agent-backend
+#   ../testing-agent-frontend
+#   ../testing-agent-llm
+#   ../testing-agent-explorer
+#
+# First-time setup:
+#   cp .env.example .env
+#   # edit .env
+#   docker compose up -d
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: ta-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - ./volumes/postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: ta-redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT}:6379"
+    volumes:
+      - ./volumes/redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: ../testing-agent-backend
+      dockerfile: Dockerfile
+    container_name: ta-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_ACCESS_TOKEN_EXPIRES_MIN: ${JWT_ACCESS_TOKEN_EXPIRES_MIN}
+      JWT_REFRESH_TOKEN_EXPIRES_DAYS: ${JWT_REFRESH_TOKEN_EXPIRES_DAYS}
+      INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL}
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD}
+      LLM_BASE_URL: http://llm:8080
+      LLM_MODELS_DIR: /var/lib/llm-models
+    ports:
+      - "${BACKEND_PORT}:8000"
+    volumes:
+      - ${LLM_MODELS_DIR}:/var/lib/llm-models
+      # Live reload during development
+      - ../testing-agent-backend/app:/app/app:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # frontend and llm are gated behind the `full` profile until their
+  # Dockerfiles land (Block 6 and Block 3 respectively). Until then,
+  # `docker compose up` brings up the core stack: postgres + redis + backend.
+  # `docker compose --profile full up` will bring up everything.
+
+  frontend:
+    profiles: ["full"]
+    build:
+      context: ../testing-agent-frontend
+      dockerfile: Dockerfile
+    container_name: ta-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL}
+    ports:
+      - "${FRONTEND_PORT}:80"
+
+  llm:
+    profiles: ["full"]
+    build:
+      context: ../testing-agent-llm
+      dockerfile: Dockerfile
+    container_name: ta-llm
+    restart: unless-stopped
+    ports:
+      - "${LLM_PORT}:8080"
+    volumes:
+      - ${LLM_MODELS_DIR}:/var/lib/llm-models
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    # On macOS, Metal acceleration is only available when running
+    # llama.cpp directly on the host. Inside Docker Desktop the container
+    # falls back to CPU. For production inference on M2 Max, run the llm
+    # service outside Docker and point LLM_BASE_URL at it.
+
+networks:
+  default:
+    name: testing-agent
