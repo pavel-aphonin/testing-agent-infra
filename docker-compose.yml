@@ -78,22 +78,19 @@ services:
       retries: 5
       start_period: 30s
 
-  # frontend and llm are gated behind the `full` profile until their
-  # Dockerfiles land (Block 6 and Block 3 respectively). Until then,
-  # `docker compose up` brings up the core stack: postgres + redis + backend.
-  # `docker compose --profile full up` will bring up everything.
+  # frontend is part of the default stack now that Block 6 has landed.
+  # llm stays gated behind `full` until Block 3 lands its Dockerfile.
 
   frontend:
-    profiles: ["full"]
     build:
       context: ../testing-agent-frontend
       dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL}
     container_name: ta-frontend
     restart: unless-stopped
     depends_on:
       - backend
-    environment:
-      VITE_API_BASE_URL: ${VITE_API_BASE_URL}
     ports:
       - "${FRONTEND_PORT}:80"
 
