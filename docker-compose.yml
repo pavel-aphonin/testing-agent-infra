@@ -63,14 +63,26 @@ services:
       JWT_REFRESH_TOKEN_EXPIRES_DAYS: ${JWT_REFRESH_TOKEN_EXPIRES_DAYS}
       INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL}
       INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD}
-      LLM_BASE_URL: http://llm:8080
+      WORKER_TOKEN: ${WORKER_TOKEN}
+      # On macOS we run llama-server natively on the host (Metal needs the
+      # real GPU, not the Docker VM), so the backend reaches it through
+      # host.docker.internal. On Linux/CUDA this is overridden to
+      # http://llm:8080 by the `full` profile.
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:8080}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://host.docker.internal:8082}
       LLM_MODELS_DIR: /var/lib/llm-models
+      APP_UPLOADS_DIR: /var/lib/app-uploads
     ports:
       - "${BACKEND_PORT}:8000"
     volumes:
       - ${LLM_MODELS_DIR}:/var/lib/llm-models
+      - ${APP_UPLOADS_DIR:-./volumes/app-uploads}:/var/lib/app-uploads
       # Live reload during development
       - ../testing-agent-backend/app:/app/app:ro
+      # Alembic migrations mounted RW so `alembic revision --autogenerate`
+      # from inside the container writes new files back to the host repo.
+      - ../testing-agent-backend/alembic:/app/alembic
+      - ../testing-agent-backend/alembic.ini:/app/alembic.ini:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -78,8 +90,38 @@ services:
       retries: 5
       start_period: 30s
 
+  # Worker — claims runs from the backend and executes them.
+  #
+  # Default executor is `synthetic` which generates fake screens/edges and
+  # is perfect for demos and CI: no Xcode, no simulator, no Appium needed.
+  # The pipe (worker → backend → Postgres → Redis → WebSocket → browser)
+  # is exactly the same as a real run.
+  #
+  # For real iOS exploration (`--executor real`) the worker must run on
+  # the host (not in Docker) because it shells out to xcrun / Appium / AXe.
+  # See testing-agent-infra/README.md "Running the worker outside Docker".
+  worker:
+    build:
+      context: ../testing-agent-explorer
+      dockerfile: Dockerfile
+    container_name: ta-worker
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      TA_BACKEND_URL: http://backend:8000
+      TA_WORKER_TOKEN: ${WORKER_TOKEN}
+    # Override the image's CLI entrypoint with the worker daemon.
+    entrypoint: ["python", "-m", "explorer.worker"]
+    command:
+      - "--backend-url"
+      - "http://backend:8000"
+      - "--executor"
+      - "synthetic"
+      - "-v"
+
   # frontend is part of the default stack now that Block 6 has landed.
-  # llm stays gated behind `full` until Block 3 lands its Dockerfile.
 
   frontend:
     build:
@@ -94,6 +136,19 @@ services:
     ports:
       - "${FRONTEND_PORT}:80"
 
+  # llama.cpp + llama-swap. Gated behind the `full` profile because Docker
+  # Desktop on macOS can't access Apple Silicon Metal — running in-container
+  # on a Mac is unusably slow for a 35B MoE model. Targets are:
+  #
+  #   - Linux + NVIDIA (CUDA build of llama.cpp): docker-native, just run
+  #     `docker compose --profile full up -d llm`.
+  #   - macOS dev on M-series: skip this service entirely and run llama.cpp
+  #     + llama-swap natively on the host. See testing-agent-infra/README.md
+  #     "First-time LLM setup → Option B" for the full recipe.
+  #
+  # The backend writes /var/lib/llm-models/llama-swap.yaml after every
+  # CRUD on llm_models; this container picks up the change via
+  # `-watch-config` without a restart.
   llm:
     profiles: ["full"]
     build:
@@ -111,10 +166,6 @@ services:
       timeout: 5s
       retries: 5
       start_period: 60s
-    # On macOS, Metal acceleration is only available when running
-    # llama.cpp directly on the host. Inside Docker Desktop the container
-    # falls back to CPU. For production inference on M2 Max, run the llm
-    # service outside Docker and point LLM_BASE_URL at it.
 
 networks:
   default:
