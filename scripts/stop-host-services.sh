@@ -8,7 +8,9 @@ set -euo pipefail
 PIDDIR="/tmp"
 SERVICES=(
   "ta-llama-chat:llama-server (Gemma chat)"
-  "ta-llama-embed:llama-server (bge embeddings)"
+  "ta-llama-embed:llama-server (Qwen3-Embedding)"
+  "ta-llama-rag:llama-server (Qwen3-8B RAG)"
+  "ta-llama-rerank:llama-server (Qwen3-Reranker)"
   "ta-worker:explorer worker"
 )
 

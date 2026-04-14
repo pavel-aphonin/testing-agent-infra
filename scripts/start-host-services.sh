@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Start all host-side services that can't run inside Docker on macOS:
-#   1. llama-server (Gemma chat, Metal GPU) — port 8080
-#   2. llama-server (bge-small embeddings)  — port 8082
-#   3. Explorer worker (real iOS executor)  — claims runs from backend
+#   1. llama-server (Gemma chat, Metal GPU)      — port 8080
+#   2. llama-server (Qwen3-Embedding-8B)          — port 8082
+#   3. llama-server (Qwen3-8B Instruct for RAG)   — port 8083
+#   4. llama-server (Qwen3-Reranker-8B)           — port 8084
+#   5. Explorer worker (real iOS executor)        — claims runs from backend
 #
 # SimMirror is NOT started here — the worker spawns it automatically
 # when it claims a run, and kills it when the run finishes.
@@ -88,15 +90,19 @@ if [[ -f "$GEMMA_GGUF" ]]; then
     echo "  ✓ Vision enabled (mmproj found)"
   fi
 
+  # Gemma-4 has a built-in "thinking" chat template that emits <think>...</think>
+  # and dumps the answer into `reasoning_content` — which broke our RAG endpoint.
+  # Force chatml to keep the answer in `content`. Also expand context to 32K so
+  # RAG can stuff full documents into the prompt.
   start_service "llama-server (Gemma chat :8080)" \
     "$PIDDIR/ta-llama-chat.pid" "$LOGDIR/ta-llama-chat.log" \
     llama-server \
       --model "$GEMMA_GGUF" \
       $MMPROJ_FLAG \
       --host 0.0.0.0 --port 8080 \
-      --ctx-size 4096 --n-gpu-layers 99 \
-      --embeddings --pooling mean \
-      --alias embeddings
+      --ctx-size 32768 --n-gpu-layers 99 \
+      --chat-template chatml \
+      --alias chat
 else
   echo "  ⚠ Gemma GGUF not found at $GEMMA_GGUF — AI/Hybrid modes won't work"
   echo "    Run: make download-models"
@@ -115,10 +121,42 @@ if [[ -f "$EMBED_GGUF" ]]; then
       --n-gpu-layers 99 \
       --alias embeddings
 else
-  echo "  ⚠ Qwen3-Embedding GGUF not found at $EMBED_GGUF — RAG will not work"
+  echo "  ⚠ Qwen3-Embedding GGUF not found at $EMBED_GGUF — RAG embeddings won't work"
 fi
 
-# 3. Explorer worker (real iOS)
+# 3. Qwen3-8B Instruct for RAG answer generation (llama-server on :8083)
+# Better than Gemma for Russian Q&A over retrieved chunks.
+RAG_LLM_GGUF="$MODELS_DIR/Qwen3-8B-Q8_0.gguf"
+if [[ -f "$RAG_LLM_GGUF" ]]; then
+  start_service "llama-server (Qwen3-8B RAG :8083)" \
+    "$PIDDIR/ta-llama-rag.pid" "$LOGDIR/ta-llama-rag.log" \
+    llama-server \
+      --model "$RAG_LLM_GGUF" \
+      --host 0.0.0.0 --port 8083 \
+      --ctx-size 32768 --n-gpu-layers 99 \
+      --chat-template chatml \
+      --alias rag-chat
+else
+  echo "  ⚠ Qwen3-8B GGUF not found at $RAG_LLM_GGUF — RAG answers will use Gemma (worse quality)"
+fi
+
+# 4. Qwen3-Reranker-8B for two-stage RAG retrieval (llama-server on :8084)
+# Over-fetches top-N from embedding search, then reranks for precision.
+RERANKER_GGUF="$MODELS_DIR/Qwen3-Reranker-8B-Q8_0.gguf"
+if [[ -f "$RERANKER_GGUF" ]]; then
+  start_service "llama-server (Qwen3-Reranker :8084)" \
+    "$PIDDIR/ta-llama-rerank.pid" "$LOGDIR/ta-llama-rerank.log" \
+    llama-server \
+      --model "$RERANKER_GGUF" \
+      --host 0.0.0.0 --port 8084 \
+      --reranking --pooling rank \
+      --ctx-size 8192 --n-gpu-layers 99 \
+      --alias reranker
+else
+  echo "  ⚠ Qwen3-Reranker GGUF not found — RAG will skip reranking stage"
+fi
+
+# 5. Explorer worker (real iOS)
 if [[ -d "$EXPLORER_DIR/.venv" ]]; then
   # Stop docker synthetic worker if it's running — otherwise two workers
   # compete for the same runs and synthetic always wins.
