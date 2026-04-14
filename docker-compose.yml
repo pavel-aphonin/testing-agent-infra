@@ -114,6 +114,10 @@ services:
     environment:
       TA_BACKEND_URL: http://backend:8000
       TA_WORKER_TOKEN: ${WORKER_TOKEN}
+      TA_LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:8080}
+      # Defect detection uses the RAG LLM (Qwen3-8B Instruct) — it's better
+      # at Russian Q&A than the agent's Gemma.
+      TA_RAG_LLM_BASE_URL: ${RAG_LLM_BASE_URL:-http://host.docker.internal:8083}
     # Override the image's CLI entrypoint with the worker daemon.
     entrypoint: ["python", "-m", "explorer.worker"]
     command:
