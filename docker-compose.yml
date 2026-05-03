@@ -92,40 +92,21 @@ services:
       retries: 5
       start_period: 30s
 
-  # Worker — claims runs from the backend and executes them.
+  # PER-48: worker service intentionally NOT in docker-compose.
   #
-  # Default executor is `synthetic` which generates fake screens/edges and
-  # is perfect for demos and CI: no Xcode, no simulator, no Appium needed.
-  # The pipe (worker → backend → Postgres → Redis → WebSocket → browser)
-  # is exactly the same as a real run.
+  # Worker shells out to `xcrun simctl` / Appium / AXe — these live on the
+  # host macOS and are not reachable from inside a Linux container. The
+  # synthetic-mode worker that used to live here generated fake graphs and
+  # silently swallowed real-app uploads, confusing every user who tried to
+  # run a real .app.zip through it.
   #
-  # For real iOS exploration (`--executor real`) the worker must run on
-  # the host (not in Docker) because it shells out to xcrun / Appium / AXe.
-  # See testing-agent-infra/README.md "Running the worker outside Docker".
-  worker:
-    build:
-      context: ../testing-agent-explorer
-      dockerfile: Dockerfile
-    container_name: ta-worker
-    restart: unless-stopped
-    depends_on:
-      backend:
-        condition: service_healthy
-    environment:
-      TA_BACKEND_URL: http://backend:8000
-      TA_WORKER_TOKEN: ${WORKER_TOKEN}
-      TA_LLM_BASE_URL: ${LLM_BASE_URL:-http://host.docker.internal:8080}
-      # Defect detection uses the RAG LLM (Qwen3-8B Instruct) — it's better
-      # at Russian Q&A than the agent's Gemma.
-      TA_RAG_LLM_BASE_URL: ${RAG_LLM_BASE_URL:-http://host.docker.internal:8083}
-    # Override the image's CLI entrypoint with the worker daemon.
-    entrypoint: ["python", "-m", "explorer.worker"]
-    command:
-      - "--backend-url"
-      - "http://backend:8000"
-      - "--executor"
-      - "synthetic"
-      - "-v"
+  # Run the worker on the host instead:
+  #
+  #     make worker-start          # foreground, useful for first run
+  #     make worker-install         # install launchd agent (auto-start)
+  #     make worker-status          # check if it's running
+  #
+  # See README.md → "Запуск worker на хосте".
 
   # frontend is part of the default stack now that Block 6 has landed.
 

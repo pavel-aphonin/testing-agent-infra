@@ -4,7 +4,7 @@
 #   2. llama-server (Qwen3-Embedding-8B)          — port 8082
 #   3. llama-server (Qwen3-8B Instruct for RAG)   — port 8083
 #   4. llama-server (Qwen3-Reranker-8B)           — port 8084
-#   5. Explorer worker (real iOS executor)        — claims runs from backend
+#   5. Explorer worker                            — claims runs from backend
 #
 # SimMirror is NOT started here — the worker spawns it automatically
 # when it claims a run, and kills it when the run finishes.
@@ -156,26 +156,19 @@ else
   echo "  ⚠ Qwen3-Reranker GGUF not found — RAG will skip reranking stage"
 fi
 
-# 5. Explorer worker (real iOS)
+# 5. Explorer worker (PER-48: synthetic mode + docker worker removed)
 if [[ -d "$EXPLORER_DIR/.venv" ]]; then
-  # Stop docker synthetic worker if it's running — otherwise two workers
-  # compete for the same runs and synthetic always wins.
-  if docker compose ps --format '{{.Name}}' 2>/dev/null | grep -q ta-worker; then
-    echo "  … stopping docker synthetic worker (ta-worker)"
-    docker compose stop worker >/dev/null 2>&1 || true
-  fi
-
   # Worker must run from the explorer directory so `python -m explorer.worker`
   # finds the package. We use env -C (change dir) + TA_LLM_BASE_URL so it
   # can reach the host llama-server for AI/Hybrid modes.
-  start_service "explorer worker (real iOS)" \
+  start_service "explorer worker" \
     "$PIDDIR/ta-worker.pid" "$LOGDIR/ta-worker.log" \
     env -C "$EXPLORER_DIR" \
       TA_LLM_BASE_URL="http://localhost:${LLM_PORT:-8080}" \
       "$EXPLORER_DIR/.venv/bin/python" -m explorer.worker \
         --backend-url "http://localhost:${BACKEND_PORT:-8000}" \
         --worker-token "$WORKER_TOKEN" \
-        --executor real -v
+        -v
 else
   echo "  ⚠ Explorer venv not found at $EXPLORER_DIR/.venv — runs will stay pending"
   echo "    Run: cd $EXPLORER_DIR && python -m venv .venv && .venv/bin/pip install -r requirements.txt"
