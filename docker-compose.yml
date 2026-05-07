@@ -108,6 +108,19 @@ services:
   #
   # See README.md → "Запуск worker на хосте".
 
+  # PER-51: corporate security suites on macOS (Norton 360, McAfee,
+  # Symantec, …) set up a system-wide HTTP proxy via ``scutil --proxy``
+  # that intercepts even loopback TCP. The fix turned out to be in the
+  # worker itself: ``httpx.AsyncClient(trust_env=False)`` makes httpx
+  # ignore both env vars AND the macOS system proxy, talking directly
+  # to backend over loopback.
+  #
+  # We tried a UDS bridge through a socat sidecar here, but bind-mounting
+  # Unix sockets between Docker Desktop's Linux VM and the macOS host is
+  # broken (docker/for-mac#5540): the file appears on the host, but
+  # connect() never reaches the listener inside the container. The
+  # trust_env=False fix makes the bridge unnecessary.
+
   # frontend is part of the default stack now that Block 6 has landed.
 
   frontend:

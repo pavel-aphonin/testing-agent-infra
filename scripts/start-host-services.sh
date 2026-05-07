@@ -162,17 +162,13 @@ if [[ -d "$EXPLORER_DIR/.venv" ]]; then
   # finds the package. We use env -C (change dir) + TA_LLM_BASE_URL so it
   # can reach the host llama-server for AI/Hybrid modes.
   #
-  # PER-48: explicitly clear proxy env vars (HTTP_PROXY / HTTPS_PROXY /
-  # ALL_PROXY / NO_PROXY) before launching worker. On macOS dev machines
-  # with Proxifier / Charles / corporate VPNs, these often point at a
-  # local proxy that returns 403 for unrecognised hosts — including
-  # backend at localhost:8000. ``env -u`` removes the variable from the
-  # child process environment so httpx sees no proxy at all.
+  # PER-51: corporate security suites (Norton 360 etc.) can configure a
+  # system-wide HTTP proxy via macOS ``scutil --proxy``. Worker uses
+  # ``httpx.AsyncClient(trust_env=False)`` to bypass it (see worker.py
+  # BackendClient docstring). No env-var manipulation needed here.
   start_service "explorer worker" \
     "$PIDDIR/ta-worker.pid" "$LOGDIR/ta-worker.log" \
     env -C "$EXPLORER_DIR" \
-      -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u NO_PROXY \
-      -u http_proxy -u https_proxy -u all_proxy -u no_proxy \
       TA_LLM_BASE_URL="http://localhost:${LLM_PORT:-8080}" \
       "$EXPLORER_DIR/.venv/bin/python" -m explorer.worker \
         --backend-url "http://localhost:${BACKEND_PORT:-8000}" \
