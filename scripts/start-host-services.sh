@@ -39,7 +39,15 @@ if [[ -f .env ]]; then
   set +a
 fi
 
-WORKER_TOKEN="${WORKER_TOKEN:-change_me_worker_token_long_random_string}"
+if [[ -z "${WORKER_TOKEN:-}" ]]; then
+  echo "ERROR: WORKER_TOKEN is not set." >&2
+  echo "Set it in infra/.env (the file is loaded above) or export it" >&2
+  echo "before running this script. Generate with:" >&2
+  echo "  openssl rand -hex 32" >&2
+  echo "No default is supplied — falling back to a placeholder would" >&2
+  echo "leave /api/internal/* protected by a known token (PER-104)." >&2
+  exit 1
+fi
 
 # ---------------------------------------------------------------- helpers
 
