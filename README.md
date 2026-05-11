@@ -22,9 +22,9 @@ All other Testing Agent repos are built from sibling directories on the develope
 | `backend` | 8000 | build `../testing-agent-backend` | testing-agent-backend |
 | `frontend` | 3000 | build `../testing-agent-frontend` | testing-agent-frontend |
 | `llm` | 8080 | build `../testing-agent-llm` | testing-agent-llm |
-| `explorer` | — | build `../testing-agent-explorer` | testing-agent-explorer (CLI, on-demand) |
+| `explorer` (host) | — | runs natively via `scripts/start-host-services.sh` | testing-agent-explorer (worker daemon) |
 
-The `explorer` service is built but not run as a long-lived container. The backend invokes it through `docker run` (or local subprocess when iOS host tools are needed).
+The worker daemon (`python -m explorer.worker`) runs natively on the host and **polls** the backend's `/api/internal/runs/claim` endpoint over HTTP. It can't live in a container because driving the iOS Simulator and the SimMirror sidecar requires macOS APIs (Xcode, ScreenCaptureKit, AppKit). The Docker stack carries postgres / redis / backend / frontend / llm.
 
 ## First-time setup
 
