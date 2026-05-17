@@ -60,3 +60,24 @@ host-logs:
 .PHONY: download-models
 download-models:
 	@bash scripts/download-models.sh
+
+# ---------- Logging (PER-118) ----------
+# `logging-up` поднимает Elasticsearch + Kibana + Filebeat под
+# profile logging и сразу прогоняет kibana-setup, чтобы data-view
+# и сохранённые поиски появились без ручной возни в UI.
+
+.PHONY: logging-up
+logging-up:
+	@docker compose --profile logging up -d
+	@$(MAKE) kibana-setup
+
+.PHONY: logging-down
+logging-down:
+	@docker compose --profile logging down
+
+# Идемпотентный bootstrap Kibana: ждёт API, импортирует data view +
+# saved searches, помечает markov-* дефолтным. Запускать после
+# первого включения logging-профиля или после миграций ES.
+.PHONY: kibana-setup
+kibana-setup:
+	@bash scripts/kibana-setup.sh

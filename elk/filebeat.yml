@@ -46,6 +46,23 @@ processors:
   # compose project, labels. Kibana can then filter by container.name.
   - add_docker_metadata:
       host: "unix:///var/run/docker.sock"
+  # PER-118: when the application emits JSON in its stdout line (i.e.
+  # the message body itself starts with ``{``), parse those fields up
+  # so Kibana can filter by ``service`` / ``logger`` / ``log.level`` /
+  # ``run_id`` etc. as proper indexed columns instead of full-text
+  # searching the ``message`` string. ``ignore_failure`` keeps the
+  # log line if it's plain text — we still get the raw message,
+  # just without structured columns.
+  - decode_json_fields:
+      fields: ["message"]
+      target: ""
+      overwrite_keys: true
+      add_error_key: false
+      max_depth: 2
+      process_array: false
+      when:
+        regexp:
+          message: "^\\{"
   # PER-118: only forward containers that opted in via the markov.log
   # label. Other services (postgres / redis / kibana / elasticsearch /
   # filebeat itself) skip — keeps the index focused on our app logs.
