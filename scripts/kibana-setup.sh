@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
-# Bootstrap Kibana (PER-118):
+# Bootstrap Elasticsearch + Kibana (PER-118):
+#   * installs ILM policy ``markov-default`` (delete after 7 days)
+#   * installs index template ``markov`` (binds policy + replicas=0)
 #   * waits until Kibana answers
 #   * imports the data view + saved searches from elk/kibana-objects.ndjson
 #   * marks the Markov data view as the default
 #
-# Idempotent — re-running just overwrites the same saved-object ids.
+# Idempotent — re-running just overwrites the same names.
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+ES_URL="${ELASTICSEARCH_URL:-http://localhost:9200}"
 KIBANA_URL="${KIBANA_URL:-http://localhost:5601}"
+RETENTION_DAYS="${LOG_RETENTION_DAYS:-7}"
 BUNDLE="elk/kibana-objects.ndjson"
 DV_ID="markov-default-data-view"
 
@@ -17,6 +21,65 @@ if [[ ! -f "$BUNDLE" ]]; then
     echo "ERROR: $BUNDLE not found — нечего импортировать" >&2
     exit 1
 fi
+
+echo "→ Ждём пока Elasticsearch отвечает на ${ES_URL}..."
+for i in $(seq 1 60); do
+    if curl -sf "${ES_URL}/_cluster/health" >/dev/null 2>&1; then
+        echo "  ✓ Elasticsearch жив."
+        break
+    fi
+    sleep 2
+    if [[ $i -eq 60 ]]; then
+        echo "  ✗ Elasticsearch не отвечает за 120 секунд. Проверь docker compose --profile logging ps" >&2
+        exit 1
+    fi
+done
+
+echo "→ Ставим ILM policy markov-default (удаляем индексы старше ${RETENTION_DAYS} дней)..."
+curl -sS -X PUT "${ES_URL}/_ilm/policy/markov-default" \
+    -H "Content-Type: application/json" \
+    -d "{
+        \"policy\": {
+            \"phases\": {
+                \"hot\": {
+                    \"min_age\": \"0ms\",
+                    \"actions\": {
+                        \"rollover\": {
+                            \"max_primary_shard_size\": \"1gb\",
+                            \"max_age\": \"1d\"
+                        }
+                    }
+                },
+                \"delete\": {
+                    \"min_age\": \"${RETENTION_DAYS}d\",
+                    \"actions\": {\"delete\": {}}
+                }
+            }
+        }
+    }" >/dev/null
+echo "  ✓ ILM policy markov-default установлена."
+
+echo "→ Привязываем index template markov-* к policy..."
+curl -sS -X PUT "${ES_URL}/_index_template/markov" \
+    -H "Content-Type: application/json" \
+    -d '{
+        "index_patterns": ["markov-*"],
+        "data_stream": {},
+        "template": {
+            "settings": {
+                "index.lifecycle.name": "markov-default",
+                "number_of_replicas": 0
+            }
+        },
+        "priority": 200
+    }' >/dev/null
+echo "  ✓ Template markov создан."
+
+# Привязываем policy и к ранее созданным индексам (Filebeat мог
+# создать их ДО того как этот скрипт прошёл первый раз).
+curl -sS -X PUT "${ES_URL}/markov-*/_settings" \
+    -H "Content-Type: application/json" \
+    -d '{"index.lifecycle.name": "markov-default"}' >/dev/null 2>&1 || true
 
 echo "→ Ждём пока Kibana отвечает на ${KIBANA_URL}..."
 for i in $(seq 1 60); do
