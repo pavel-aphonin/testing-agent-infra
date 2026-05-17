@@ -50,6 +50,11 @@ services:
       dockerfile: Dockerfile
     container_name: ta-backend
     restart: unless-stopped
+    # PER-118: opt in to Filebeat ingestion. ``markov.service`` is used
+    # by the Filebeat index pattern (markov-<service>-YYYY.MM.DD).
+    labels:
+      markov.log: "true"
+      markov.service: "backend"
     depends_on:
       postgres:
         condition: service_healthy
@@ -74,6 +79,13 @@ services:
       RERANKER_BASE_URL: ${RERANKER_BASE_URL:-http://host.docker.internal:8084}
       LLM_MODELS_DIR: /var/lib/llm-models
       APP_UPLOADS_DIR: /var/lib/app-uploads
+      # PER-118: centralised logging. Backend reads these to decide
+      # whether to emit JSON-formatted logs (any value other than
+      # ``none`` flips the formatter to JSON; ``elasticsearch`` and
+      # ``external`` are functionally identical from the app side —
+      # the difference is only in where Filebeat / the customer's
+      # collector picks them up).
+      LOGGING_BACKEND: ${LOGGING_BACKEND:-none}
     ports:
       - "${BACKEND_PORT}:8000"
     volumes:
@@ -135,6 +147,102 @@ services:
       - backend
     ports:
       - "${FRONTEND_PORT}:80"
+
+  # ── PER-118: centralised logging (ELK) ─────────────────────────────────
+  # Three modes, controlled by LOGGING_BACKEND in .env:
+  #   elasticsearch (default) → bring up these three containers under the
+  #                              `logging` profile; backend + worker JSON
+  #                              logs flow into Elasticsearch via Filebeat
+  #                              and are visible in Kibana on :5601.
+  #   external                → don't run these; backend + worker ship
+  #                              straight to ${ELASTICSEARCH_URL} (e.g.
+  #                              the customer's existing ELK).
+  #   none                    → don't run these; everything stays in
+  #                              container stdout exactly as before.
+  #
+  # All three containers stay behind the `logging` profile so users who
+  # picked `external` or `none` never spin them up by accident:
+  #     docker compose --profile logging up -d
+  # See testing-agent-infra/README.md → "Логирование" for the full guide.
+
+  elasticsearch:
+    profiles: ["logging"]
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
+    container_name: ta-elasticsearch
+    restart: unless-stopped
+    environment:
+      # Single-node mode — fine for local dev / small on-prem demos.
+      # Production deploys at the customer should point at their own
+      # multi-node cluster via LOGGING_BACKEND=external instead.
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      # Heap kept modest so an idle dev box doesn't hit the JVM-locked
+      # 1GB minimum. Bump for heavier ingestion.
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - ./volumes/elasticsearch-data:/usr/share/elasticsearch/data
+    ports:
+      - "${ELASTICSEARCH_PORT:-9200}:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -q '\"status\":\"\\(green\\|yellow\\)\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  kibana:
+    profiles: ["logging"]
+    image: docker.elastic.co/kibana/kibana:8.13.0
+    container_name: ta-kibana
+    restart: unless-stopped
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      ELASTICSEARCH_HOSTS: "http://elasticsearch:9200"
+      # Russian locale for the demo — matches the rest of the UI.
+      I18N_LOCALE: "ru-RU"
+    ports:
+      - "${KIBANA_PORT:-5601}:5601"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5601/api/status >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+  filebeat:
+    profiles: ["logging"]
+    image: docker.elastic.co/beats/filebeat:8.13.0
+    container_name: ta-filebeat
+    restart: unless-stopped
+    # Filebeat needs to read container logs through the docker daemon
+    # socket and parse the per-container JSON log files written by
+    # docker's default ``json-file`` log driver.
+    user: root
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    volumes:
+      - ./elk/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./volumes/filebeat-data:/usr/share/filebeat/data
+      # PER-118: explorer worker runs on the host (Apple Metal access),
+      # so its log file isn't a docker container log. Mount the host
+      # /tmp into Filebeat read-only so the same daemon picks up both
+      # container output and worker file logs.
+      - /tmp:/host/tmp:ro
+    command: ["--strict.perms=false"]
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep filebeat >/dev/null"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
 
   # llama.cpp + llama-swap. Gated behind the `full` profile because Docker
   # Desktop on macOS can't access Apple Silicon Metal — running in-container

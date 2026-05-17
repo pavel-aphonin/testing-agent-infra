@@ -1,0 +1,73 @@
+# Filebeat — collects docker container logs and ships them to Elasticsearch.
+#
+# PER-118: backend + worker emit one-line JSON to stdout; Docker's default
+# json-file log driver captures that in /var/lib/docker/containers/<id>/<id>-json.log.
+# We auto-discover those files via the `container` input + add_docker_metadata
+# processor so each event gets enriched with container name, image, labels, etc.
+#
+# Only containers carrying the label ``markov.log=true`` (set on backend +
+# worker — workers run on the host but Vector / a future sidecar will add it)
+# are forwarded; anything else (postgres, redis, elasticsearch itself) goes
+# nowhere to keep the index lean.
+
+filebeat.inputs:
+  - type: container
+    paths:
+      - /var/lib/docker/containers/*/*.log
+    # JSON-decode the message body if it parses, otherwise keep raw.
+    # ``add_error_key`` makes broken JSON visible in Kibana under
+    # ``error.message`` instead of silently dropped.
+    json.keys_under_root: true
+    json.add_error_key: true
+    json.message_key: message
+
+  # PER-118: explorer worker logs (host-side Python process). The host
+  # /tmp is bind-mounted to /host/tmp in this container so we can tail
+  # the same files the worker writes. ``markov.service: worker`` is
+  # forced via fields because there's no docker label on host files.
+  - type: log
+    enabled: true
+    paths:
+      - /host/tmp/ta-worker.log
+    # Worker emits JSON when LOGGING_BACKEND != none; otherwise the
+    # raw line lands in ``message`` and the index still gets it.
+    json.keys_under_root: true
+    json.add_error_key: true
+    json.message_key: message
+    fields:
+      container:
+        labels:
+          markov_log: "true"
+          markov_service: "worker"
+    fields_under_root: true
+
+processors:
+  # Tag every event with the container's docker metadata — name, image,
+  # compose project, labels. Kibana can then filter by container.name.
+  - add_docker_metadata:
+      host: "unix:///var/run/docker.sock"
+  # PER-118: only forward containers that opted in via the markov.log
+  # label. Other services (postgres / redis / kibana / elasticsearch /
+  # filebeat itself) skip — keeps the index focused on our app logs.
+  - drop_event:
+      when:
+        not:
+          equals:
+            container.labels.markov_log: "true"
+  # Trim noisy filebeat-internal fields that aren't useful for app debugging.
+  - drop_fields:
+      fields: ["agent", "ecs", "host", "input", "log.offset", "stream"]
+      ignore_missing: true
+
+output.elasticsearch:
+  hosts: ["http://elasticsearch:9200"]
+  # Index per service per day. Kibana can search across all of them with
+  # the data view ``markov-*``.
+  index: "markov-%{[container.labels.markov_service]:unknown}-%{+yyyy.MM.dd}"
+
+setup.template.name: "markov"
+setup.template.pattern: "markov-*"
+setup.ilm.enabled: false
+
+logging.level: info
+logging.to_stderr: true

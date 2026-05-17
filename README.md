@@ -137,6 +137,65 @@ docker compose restart backend      # reload after code change (or use hot-reloa
 docker compose down -v              # stop + wipe volumes (DB reset)
 ```
 
+## Логирование (PER-118)
+
+Три режима, переключаются переменной `LOGGING_BACKEND` в `.env`.
+
+### `none` (по умолчанию)
+
+```
+LOGGING_BACKEND=none
+docker compose up -d
+```
+
+Сервисы пишут plain-text в stdout, как раньше. `docker logs ta-backend` / `tail -f /tmp/ta-worker.log` — привычный формат `2026-05-18 00:01:23 [INFO] explorer.scenario_runner: …`. Никаких дополнительных контейнеров.
+
+Подходит когда:
+- разработка на dev-машине одного инженера;
+- не нужны Kibana / поиск по логам.
+
+### `elasticsearch` — свой ELK в docker-compose
+
+```
+LOGGING_BACKEND=elasticsearch
+docker compose --profile logging up -d
+```
+
+Поднимает три дополнительных контейнера:
+- `ta-elasticsearch` — single-node ES (`localhost:9200`, persistent volume `./volumes/elasticsearch-data`);
+- `ta-kibana` — UI на `localhost:5601`;
+- `ta-filebeat` — собирает логи backend (docker-stdout) и worker (`/tmp/ta-worker.log` через bind-mount хоста).
+
+Сервисы переходят на **JSON-логирование**: одна строка = один JSON-объект с `@timestamp`, `log.level`, `logger`, `message`, `service`, плюс контекст (`run_id` / `scenario_id` / `goal_node_id` где они есть).
+
+После старта зайди в Kibana → **Stack Management → Data Views → Create data view → Index pattern `markov-*`** → выбери `@timestamp`. Дальше в **Discover** можно фильтровать `service:"backend"`, `service:"worker"`, `run_id:"…"` и т.п.
+
+Удалить накопленные данные:
+```
+docker compose --profile logging down
+sudo rm -rf volumes/elasticsearch-data volumes/filebeat-data
+```
+
+### `external` — отдать клиентскому ELK / Splunk / Datadog
+
+```
+LOGGING_BACKEND=external
+ELASTICSEARCH_URL=https://elk.bank.ru:9200
+ELASTICSEARCH_USER=markov-ingest
+ELASTICSEARCH_PASSWORD=<secret>
+docker compose up -d                # БЕЗ profile logging
+```
+
+Сервисы пишут те же JSON-логи в stdout. Наши `elasticsearch`/`kibana`/`filebeat` не запускаются. Клиент сам подбирает stdout контейнеров своим коллектором (или развернёт Filebeat / Vector / Fluentd рядом — конфиг из `elk/filebeat.yml` нам подходит как образец, нужно только сменить `output.elasticsearch.hosts` на их endpoint).
+
+Поля в JSON совпадают со схемой режима `elasticsearch`, так что дашборды клиента можно переиспользовать.
+
+### Что в логах искать
+
+- `run_id:"<uuid>"` — все события одного прогона между сервисами.
+- `logger:"explorer.scenario_runner" AND message:"[goal] decision"` — каждое решение LLM в goal-узле (action / element_label / value_source / reasoning).
+- `log.level:"ERROR"` — глобальный фильтр ошибок.
+
 ## Related repos
 
 - `testing-agent-explorer`
