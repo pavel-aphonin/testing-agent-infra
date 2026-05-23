@@ -41,6 +41,29 @@ filebeat.inputs:
           markov_service: "worker"
     fields_under_root: true
 
+  # PER-163: llama-server logs (chat + RAG stack). When an LLM call
+  # misbehaves — wrong image-token budget, broken chat template, GBNF
+  # rejection, MoE cold-start timeouts — the worker's log only shows
+  # the symptom ("llm_no_decision"). The cause lives in
+  # /tmp/ta-llama-chat.log (and -embed/-rag/-rerank for the RAG
+  # stack). Ingesting them into ELK lets us correlate worker decisions
+  # with llama-server's view of the same request in Kibana.
+  - type: log
+    enabled: true
+    paths:
+      - /host/tmp/ta-llama-chat.log
+      - /host/tmp/ta-llama-embed.log
+      - /host/tmp/ta-llama-rag.log
+      - /host/tmp/ta-llama-rerank.log
+    # llama-server logs are plain text (key=value lines). No JSON
+    # decoding — message stays as-is so Kibana full-text searches it.
+    fields:
+      container:
+        labels:
+          markov_log: "true"
+          markov_service: "llama"
+    fields_under_root: true
+
 processors:
   # Tag every event with the container's docker metadata — name, image,
   # compose project, labels. Kibana can then filter by container.name.

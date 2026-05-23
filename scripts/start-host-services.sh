@@ -88,32 +88,63 @@ start_service() {
 echo "=== Starting host services ==="
 echo ""
 
-# 1. Gemma chat (llama-server on :8080)
-GEMMA_GGUF="$MODELS_DIR/gemma-4-E4B-it-Q4_K_M.gguf"
-if [[ -f "$GEMMA_GGUF" ]]; then
-  MMPROJ_GGUF="$MODELS_DIR/mmproj-F16.gguf"
+# 1. Chat llama-server on :8080 — config from backend
+#
+# PER-163: the launcher asks the backend which model is currently
+# active and reads its full config (GGUF path, mmproj, ctx tokens,
+# image_min_tokens for grounding). Hard-coding Gemma here was the
+# reason every model swap forced a script edit + restart cycle; now
+# swapping a model is a single UPDATE llm_models SET is_active=true
+# WHERE name='...' and a process restart.
+#
+# Falls back to the legacy Gemma-4 path only when the backend has
+# no active chat model and the legacy GGUF is on disk — so the
+# script still boots on a fresh machine before any model is
+# registered.
+
+CHAT_CFG_JSON="$(curl -sS \
+  -H "Authorization: Bearer ${WORKER_TOKEN}" \
+  http://localhost:8000/api/internal/chat-model/config 2>/dev/null || true)"
+
+if echo "$CHAT_CFG_JSON" | python3 -c 'import sys, json; json.loads(sys.stdin.read())["name"]' >/dev/null 2>&1; then
+  # Translate container-internal paths (/var/lib/llm-models/<file>)
+  # back to host paths (the backend stores the container view).
+  export MODELS_DIR
+  CHAT_NAME=$(echo "$CHAT_CFG_JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin)["name"])')
+  CHAT_GGUF=$(echo "$CHAT_CFG_JSON" | python3 -c 'import sys,json,os;p=json.load(sys.stdin)["gguf_path"];print(p.replace("/var/lib/llm-models",os.environ["MODELS_DIR"]))' )
+  CHAT_MMPROJ=$(echo "$CHAT_CFG_JSON" | python3 -c 'import sys,json,os;p=json.load(sys.stdin).get("mmproj_path");print((p or "").replace("/var/lib/llm-models",os.environ["MODELS_DIR"]))' )
+  CHAT_CTX=$(echo "$CHAT_CFG_JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("max_context_tokens") or 32768)')
+  CHAT_IMG_MIN=$(echo "$CHAT_CFG_JSON" | python3 -c 'import sys,json;v=json.load(sys.stdin).get("image_min_tokens");print(v if v else "")')
+  echo "  ✓ Chat model from backend: $CHAT_NAME"
+
   MMPROJ_FLAG=""
-  if [[ -f "$MMPROJ_GGUF" ]]; then
-    MMPROJ_FLAG="--mmproj $MMPROJ_GGUF"
-    echo "  ✓ Vision enabled (mmproj found)"
+  if [[ -n "$CHAT_MMPROJ" && -f "$CHAT_MMPROJ" ]]; then
+    MMPROJ_FLAG="--mmproj $CHAT_MMPROJ"
+    echo "    Vision enabled (mmproj=$(basename "$CHAT_MMPROJ"))"
+  fi
+  IMG_MIN_FLAG=""
+  if [[ -n "$CHAT_IMG_MIN" ]]; then
+    IMG_MIN_FLAG="--image-min-tokens $CHAT_IMG_MIN"
+    echo "    Grounding budget: --image-min-tokens $CHAT_IMG_MIN"
   fi
 
-  # Gemma-4 has a built-in "thinking" chat template that emits <think>...</think>
-  # and dumps the answer into `reasoning_content` — which broke our RAG endpoint.
-  # Force chatml to keep the answer in `content`. Also expand context to 32K so
-  # RAG can stuff full documents into the prompt.
-  start_service "llama-server (Gemma chat :8080)" \
-    "$PIDDIR/ta-llama-chat.pid" "$LOGDIR/ta-llama-chat.log" \
-    llama-server \
-      --model "$GEMMA_GGUF" \
-      $MMPROJ_FLAG \
-      --host 0.0.0.0 --port 8080 \
-      --ctx-size 32768 --n-gpu-layers 99 \
-      --chat-template chatml \
-      --alias chat
+  if [[ ! -f "$CHAT_GGUF" ]]; then
+    echo "  ⚠ Chat GGUF not on disk: $CHAT_GGUF — skipping :8080"
+  else
+    start_service "llama-server (chat :8080 = $CHAT_NAME)" \
+      "$PIDDIR/ta-llama-chat.pid" "$LOGDIR/ta-llama-chat.log" \
+      llama-server \
+        --model "$CHAT_GGUF" \
+        $MMPROJ_FLAG \
+        $IMG_MIN_FLAG \
+        --host 0.0.0.0 --port 8080 \
+        --ctx-size "$CHAT_CTX" --n-gpu-layers 99 \
+        --alias chat --jinja
+  fi
 else
-  echo "  ⚠ Gemma GGUF not found at $GEMMA_GGUF — AI/Hybrid modes won't work"
-  echo "    Run: make download-models"
+  echo "  ⚠ Backend chat-model config unavailable (backend down or no"
+  echo "    active vision model). Skipping :8080 — start it manually."
+  echo "    Set is_active=true on a row in llm_models and re-run."
 fi
 
 # 2. Qwen3-Embedding-8B (llama-server on :8082)
