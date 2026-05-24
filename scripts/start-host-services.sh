@@ -243,6 +243,28 @@ else
   echo "    Run: cd $EXPLORER_DIR && python -m venv .venv && .venv/bin/pip install -r requirements.txt"
 fi
 
+
+# PER-163 retry #2: poke Filebeat into re-reading host log files.
+#
+# Docker Desktop's gRPC-FUSE bind-mount on macOS caches a snapshot of
+# /tmp at container-start time. When start-host-services truncates or
+# replaces /tmp/ta-llama-*.log (new inode after the host process
+# restarts), the Filebeat container keeps seeing the stale inode and
+# never picks up the live host file. Symptom: markov-llama-* index
+# stays frozen at the time the container booted, even though host
+# llama-server keeps writing.
+#
+# Cleanest fix is to recreate the container so the FUSE mount
+# refreshes. Cheaper than tearing it down/up: kill the harvester
+# state and let docker restart re-attach. We do the restart only when
+# docker is reachable and the ta-filebeat container exists — otherwise
+# the script still completes cleanly for ad-hoc local dev.
+if docker inspect ta-filebeat >/dev/null 2>&1; then
+  echo "  ⟳ Restarting ta-filebeat so it re-mounts the host /tmp view"
+  docker restart ta-filebeat >/dev/null 2>&1 || \
+    echo "    (restart failed — Filebeat may keep showing stale llama logs)"
+fi
+
 echo ""
 echo "=== Done ==="
 echo ""
