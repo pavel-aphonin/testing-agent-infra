@@ -142,9 +142,34 @@ if echo "$CHAT_CFG_JSON" | python3 -c 'import sys, json; json.loads(sys.stdin.re
         --alias chat --jinja
   fi
 else
-  echo "  ⚠ Backend chat-model config unavailable (backend down or no"
-  echo "    active vision model). Skipping :8080 — start it manually."
-  echo "    Set is_active=true on a row in llm_models and re-run."
+  # PER-163 retry: real fallback to the legacy Gemma-4 GGUF if it's on
+  # disk. Lets the script boot on a fresh machine before any model
+  # is registered in the DB. Logs the fact loudly so it's obvious
+  # the script picked a default instead of the operator's choice.
+  GEMMA_LEGACY="$MODELS_DIR/gemma-4-E4B-it-Q4_K_M.gguf"
+  if [[ -f "$GEMMA_LEGACY" ]]; then
+    echo "  ⚠ Backend chat-model config unavailable — falling back to"
+    echo "    legacy GGUF $GEMMA_LEGACY"
+    MMPROJ_LEGACY="$MODELS_DIR/mmproj-F16.gguf"
+    MMPROJ_FLAG=""
+    if [[ -f "$MMPROJ_LEGACY" ]]; then
+      MMPROJ_FLAG="--mmproj $MMPROJ_LEGACY"
+    fi
+    start_service "llama-server (chat :8080 = legacy gemma)" \
+      "$PIDDIR/ta-llama-chat.pid" "$LOGDIR/ta-llama-chat.log" \
+      llama-server \
+        --model "$GEMMA_LEGACY" \
+        $MMPROJ_FLAG \
+        --host 0.0.0.0 --port 8080 \
+        --ctx-size 32768 --n-gpu-layers 99 \
+        --chat-template chatml \
+        --alias chat
+  else
+    echo "  ⚠ Backend chat-model config unavailable (backend down or no"
+    echo "    active vision model) AND no legacy GGUF on disk."
+    echo "    Skipping :8080 — set is_active=true on a row in llm_models"
+    echo "    and re-run, or drop a model file at $GEMMA_LEGACY."
+  fi
 fi
 
 # 2. Qwen3-Embedding-8B (llama-server on :8082)
