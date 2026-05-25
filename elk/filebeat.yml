@@ -52,11 +52,34 @@ filebeat.inputs:
     enabled: true
     paths:
       - /host/tmp/ta-llama-chat.log
+      - /host/tmp/ta-llama-grounder.log
       - /host/tmp/ta-llama-embed.log
       - /host/tmp/ta-llama-rag.log
       - /host/tmp/ta-llama-rerank.log
     # llama-server logs are plain text (key=value lines). No JSON
     # decoding — message stays as-is so Kibana full-text searches it.
+    #
+    # PER-163 retry #3 / PER-167: Docker Desktop's gRPC-FUSE bind
+    # mount does NOT propagate file size/mtime updates to the
+    # container side after the initial mount snapshot. Symptom:
+    # host /tmp/ta-llama-chat.log grows on append, container
+    # /host/tmp/ta-llama-chat.log stays frozen, Filebeat sees no
+    # new bytes, markov-llama-* never updates.
+    #
+    # Workaround: force the harvester to close the file handle
+    # frequently. Each close + re-open triggers a fresh stat()
+    # via the FUSE layer, which DOES re-fetch the host file's
+    # actual size at that moment. scan_frequency controls how
+    # often Filebeat discovers files (so re-open is cheap);
+    # close_inactive forces the close even when reads are still
+    # returning data (overkill normally, exactly what we need
+    # here). The result: at most close_inactive + scan_frequency
+    # delay between host append and ELK ingestion (~5s), with no
+    # manual ``docker restart ta-filebeat`` needed.
+    scan_frequency: 2s
+    close_inactive: 5s
+    close_renamed: true
+    close_removed: true
     fields:
       container:
         labels:

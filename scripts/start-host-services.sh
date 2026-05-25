@@ -115,6 +115,7 @@ if echo "$CHAT_CFG_JSON" | python3 -c 'import sys, json; json.loads(sys.stdin.re
   CHAT_MMPROJ=$(echo "$CHAT_CFG_JSON" | python3 -c 'import sys,json,os;p=json.load(sys.stdin).get("mmproj_path");print((p or "").replace("/var/lib/llm-models",os.environ["MODELS_DIR"]))' )
   CHAT_CTX=$(echo "$CHAT_CFG_JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("max_context_tokens") or 32768)')
   CHAT_IMG_MIN=$(echo "$CHAT_CFG_JSON" | python3 -c 'import sys,json;v=json.load(sys.stdin).get("image_min_tokens");print(v if v else "")')
+  CHAT_THINKING=$(echo "$CHAT_CFG_JSON" | python3 -c 'import sys,json;v=json.load(sys.stdin).get("supports_thinking");print("on" if v else "off")')
   echo "  ✓ Chat model from backend: $CHAT_NAME"
 
   MMPROJ_FLAG=""
@@ -127,6 +128,15 @@ if echo "$CHAT_CFG_JSON" | python3 -c 'import sys, json; json.loads(sys.stdin.re
     IMG_MIN_FLAG="--image-min-tokens $CHAT_IMG_MIN"
     echo "    Grounding budget: --image-min-tokens $CHAT_IMG_MIN"
   fi
+  # PER-165: honour supports_thinking passport. When the chat
+  # template auto-enables thinking mode (Gemma 4, Qwen 3.5/3.6,
+  # DeepSeek-R1 family) and the worker isn't built to extract
+  # ``reasoning_content``, generated tokens vanish into the
+  # thinking channel and ``content`` arrives empty — worker logs
+  # ``llm_no_decision`` even though the model actually answered.
+  # ``--reasoning off`` collapses thinking back into ``content``.
+  REASONING_FLAG="--reasoning $CHAT_THINKING"
+  echo "    Thinking mode: $CHAT_THINKING (from passport)"
 
   if [[ ! -f "$CHAT_GGUF" ]]; then
     echo "  ⚠ Chat GGUF not on disk: $CHAT_GGUF — skipping :8080"
@@ -137,6 +147,7 @@ if echo "$CHAT_CFG_JSON" | python3 -c 'import sys, json; json.loads(sys.stdin.re
         --model "$CHAT_GGUF" \
         $MMPROJ_FLAG \
         $IMG_MIN_FLAG \
+        $REASONING_FLAG \
         --host 0.0.0.0 --port 8080 \
         --ctx-size "$CHAT_CTX" --n-gpu-layers 99 \
         --alias chat --jinja
@@ -170,6 +181,61 @@ else
     echo "    Skipping :8080 — set is_active=true on a row in llm_models"
     echo "    and re-run, or drop a model file at $GEMMA_LEGACY."
   fi
+fi
+
+# 1a. Grounder llama-server (default :8081 = UI-TARS-1.5-7B)
+#
+# PER-164: dense general-purpose VLMs (Qwen3-VL/Gemma 4/Qwen 3.6 — see
+# PER-163 retry #2 comparison) all fail at canvas-keypad grounding.
+# We plug in a dedicated grounder model on a second port; the worker
+# routes ``tap_at`` with ``element_id=null`` decisions to it instead
+# of trusting the chat-LLM's own pixel guess. Endpoint, GGUF, port,
+# and image_min_tokens all come from the grounder_models DB row, so
+# swapping UI-TARS for Molmo/ShowUI is one UPDATE + restart away.
+#
+# Silently skipped (no fallback) when there is no active grounder in
+# the DB — the worker is expected to fall back to coordinates from
+# the chat-LLM in that case, which is the pre-PER-164 behaviour.
+
+GRD_CFG_JSON="$(curl -sS \
+  -H "Authorization: Bearer ${WORKER_TOKEN}" \
+  http://localhost:8000/api/internal/grounder/config 2>/dev/null || true)"
+
+if echo "$GRD_CFG_JSON" | python3 -c 'import sys, json; json.loads(sys.stdin.read())["name"]' >/dev/null 2>&1; then
+  export MODELS_DIR
+  GRD_NAME=$(echo "$GRD_CFG_JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin)["name"])')
+  GRD_GGUF=$(echo "$GRD_CFG_JSON" | python3 -c 'import sys,json,os;p=json.load(sys.stdin)["gguf_path"];print(p.replace("/var/lib/llm-models",os.environ["MODELS_DIR"]))' )
+  GRD_MMPROJ=$(echo "$GRD_CFG_JSON" | python3 -c 'import sys,json,os;p=json.load(sys.stdin).get("mmproj_path");print((p or "").replace("/var/lib/llm-models",os.environ["MODELS_DIR"]))' )
+  GRD_PORT=$(echo "$GRD_CFG_JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("endpoint_port") or 8081)')
+  GRD_CTX=$(echo "$GRD_CFG_JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("max_context_tokens") or 16384)')
+  GRD_IMG_MIN=$(echo "$GRD_CFG_JSON" | python3 -c 'import sys,json;v=json.load(sys.stdin).get("image_min_tokens");print(v if v else "")')
+
+  GRD_MMPROJ_FLAG=""
+  if [[ -n "$GRD_MMPROJ" && -f "$GRD_MMPROJ" ]]; then
+    GRD_MMPROJ_FLAG="--mmproj $GRD_MMPROJ"
+  fi
+  GRD_IMG_MIN_FLAG=""
+  if [[ -n "$GRD_IMG_MIN" ]]; then
+    GRD_IMG_MIN_FLAG="--image-min-tokens $GRD_IMG_MIN"
+  fi
+
+  if [[ ! -f "$GRD_GGUF" ]]; then
+    echo "  ⚠ Grounder GGUF not on disk: $GRD_GGUF — skipping :$GRD_PORT"
+  else
+    echo "  ✓ Grounder from backend: $GRD_NAME (port :$GRD_PORT)"
+    start_service "llama-server (grounder :$GRD_PORT = $GRD_NAME)" \
+      "$PIDDIR/ta-llama-grounder.pid" "$LOGDIR/ta-llama-grounder.log" \
+      llama-server \
+        --model "$GRD_GGUF" \
+        $GRD_MMPROJ_FLAG \
+        $GRD_IMG_MIN_FLAG \
+        --reasoning off \
+        --host 0.0.0.0 --port "$GRD_PORT" \
+        --ctx-size "$GRD_CTX" --n-gpu-layers 99 \
+        --alias grounder --jinja
+  fi
+else
+  echo "  · No active grounder in DB — tap_at will use chat-LLM coords (pre-PER-164 path)"
 fi
 
 # 2. Qwen3-Embedding-8B (llama-server on :8082)
@@ -263,6 +329,31 @@ if docker inspect ta-filebeat >/dev/null 2>&1; then
   echo "  ⟳ Restarting ta-filebeat so it re-mounts the host /tmp view"
   docker restart ta-filebeat >/dev/null 2>&1 || \
     echo "    (restart failed — Filebeat may keep showing stale llama logs)"
+fi
+
+# PER-163 retry #3: VirtioFS bounce loop.
+#
+# Even after the one-shot restart above, Docker Desktop's VirtioFS
+# does not propagate further host appends through the bind-mounted
+# ``/private/tmp`` view — the container keeps its initial snapshot
+# of each file's size/mtime and Filebeat reads against that frozen
+# view. Empirically: host file grows from 38KB → 44KB, container
+# still sees 38KB, fresh ``llama-server`` lines never reach ELK.
+# This is a known limitation of macOS Docker Desktop file sharing
+# (independent of close_inactive / scan_frequency tweaks — VirtioFS
+# returns cached stat() even after open()+close()+reopen()).
+#
+# The only workaround that actually works is to recreate the FUSE
+# snapshot periodically by restarting the container. We do it in a
+# background loop at 60s cadence — short enough that grounding
+# audit lag stays observable, long enough that the ~3s restart
+# downtime is a tiny fraction of uptime. The bouncer becomes one
+# more managed service in the PIDS/ scheme so ``stop-host-services``
+# kills it cleanly.
+if docker inspect ta-filebeat >/dev/null 2>&1; then
+  start_service "filebeat-bouncer (VirtioFS workaround)" \
+    "$PIDDIR/ta-filebeat-bouncer.pid" "$LOGDIR/ta-filebeat-bouncer.log" \
+    bash -c 'while true; do sleep 60; docker restart ta-filebeat >/dev/null 2>&1 || true; done'
 fi
 
 echo ""

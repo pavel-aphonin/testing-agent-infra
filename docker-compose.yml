@@ -44,6 +44,30 @@ services:
       timeout: 3s
       retries: 10
 
+  # PER-169: FalkorDB — graph database backend for Graphiti
+  # episodic memory. Sparse-matrix-based query engine (≈345×
+  # faster than Neo4j on p99 per FalkorDB benchmarks). Used by
+  # the explorer worker to record agent actions as episodes and
+  # recall them via semantic search, so chat-LLM can see «PIN
+  # уже введён 8520, нажми Forward» instead of looping on the
+  # same digit 5 times. Exposed on host port 6380 to avoid
+  # conflicting with Redis on 6379. Uses the official FalkorDB
+  # image which bundles RedisGraph protocol + REST + Browser UI
+  # on :3000 (container-internal, optional to expose).
+  falkordb:
+    image: falkordb/falkordb:latest
+    container_name: ta-falkordb
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+    volumes:
+      - ./volumes/falkordb-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   backend:
     build:
       context: ../testing-agent-backend
@@ -236,7 +260,20 @@ services:
       # so its log file isn't a docker container log. Mount the host
       # /tmp into Filebeat read-only so the same daemon picks up both
       # container output and worker file logs.
-      - /tmp:/host/tmp:ro
+      #
+      # PER-163 retry #3: mount via the **resolved** path
+      # ``/private/tmp`` (which is what ``/tmp`` symlinks to on
+      # macOS) rather than ``/tmp`` itself. Docker Desktop's
+      # VirtioFS file sharing has the resolved ``/private`` in its
+      # shared list — the ``/tmp`` symlink works for initial
+      # access but VirtioFS does not propagate file size/mtime
+      # updates through the symlink to the container view (we
+      # observed host file at 36144 bytes while ``/host/tmp/...``
+      # inside Filebeat stayed at 33459 indefinitely). Mounting
+      # the resolved path lets VirtioFS see the appends and
+      # forward them; Filebeat then ingests fresh llama-server
+      # log lines without manual ``docker restart ta-filebeat``.
+      - /private/tmp:/host/tmp:ro
     command: ["--strict.perms=false"]
     healthcheck:
       test: ["CMD-SHELL", "pgrep filebeat >/dev/null"]
