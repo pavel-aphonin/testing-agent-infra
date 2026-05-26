@@ -398,15 +398,22 @@ fi
 #
 # The only workaround that actually works is to recreate the FUSE
 # snapshot periodically by restarting the container. We do it in a
-# background loop at 60s cadence — short enough that grounding
-# audit lag stays observable, long enough that the ~3s restart
-# downtime is a tiny fraction of uptime. The bouncer becomes one
-# more managed service in the PIDS/ scheme so ``stop-host-services``
-# kills it cleanly.
+# background loop. The bouncer becomes one more managed service in
+# the PIDS/ scheme so ``stop-host-services`` kills it cleanly.
+#
+# PER-167: cadence reduced 60s → 15s. The previous 60s interval
+# meant any ad-hoc llama-server restart (debugging, model swap via
+# CLI) could spend up to a minute invisible in Kibana while the
+# bouncer waited out its cycle. ~3s restart downtime × 4 restarts/min
+# = ~12s of unobserved time per minute — still <25% of wall time
+# and the recovery window now matches a reasonable «refresh and see»
+# debugging loop. ``$TA_FILEBEAT_BOUNCER_INTERVAL`` overrides for
+# anyone tuning the trade-off further.
 if docker inspect ta-filebeat >/dev/null 2>&1; then
-  start_service "filebeat-bouncer (VirtioFS workaround)" \
+  BOUNCER_INTERVAL="${TA_FILEBEAT_BOUNCER_INTERVAL:-15}"
+  start_service "filebeat-bouncer (VirtioFS workaround, ${BOUNCER_INTERVAL}s)" \
     "$PIDDIR/ta-filebeat-bouncer.pid" "$LOGDIR/ta-filebeat-bouncer.log" \
-    bash -c 'while true; do sleep 60; docker restart ta-filebeat >/dev/null 2>&1 || true; done'
+    bash -c "while true; do sleep ${BOUNCER_INTERVAL}; docker restart ta-filebeat >/dev/null 2>&1 || true; done"
 fi
 
 echo ""

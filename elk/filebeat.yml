@@ -80,6 +80,22 @@ filebeat.inputs:
     close_inactive: 5s
     close_renamed: true
     close_removed: true
+    # PER-167: clean the registry entry once the inode hasn't been seen
+    # for ``clean_inactive``. Without this, every ad-hoc llama-server
+    # restart (debugging, model switching via CLI, ``> /tmp/ta-llama-
+    # chat.log`` redirects) leaves a stale registry row keyed on the
+    # old inode forever — the registry grows indefinitely and old
+    # rows confuse Filebeat's «have we seen this file» logic on the
+    # next start. 2 minutes is comfortably longer than clean_inactive
+    # is required to be (>= ignore_older + scan_frequency), and short
+    # enough that a one-off restart cleans itself up within minutes
+    # of being abandoned.
+    clean_inactive: 2m
+    # PER-167: don't tail historic logs that haven't been touched in
+    # over an hour. Stops Filebeat from re-ingesting an old day's
+    # ``ta-llama-chat.log`` after a Mac reboot when systemd-style
+    # rotation puts the file back at offset 0.
+    ignore_older: 1h
     fields:
       container:
         labels:
