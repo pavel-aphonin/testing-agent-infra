@@ -32,6 +32,39 @@ EXPLORER_DIR="$(cd ../testing-agent-explorer && pwd)"
 PIDDIR="/tmp"
 LOGDIR="/tmp"
 
+# PER-108: bind llama-server processes to loopback by default. The
+# previous default (literal --host 0.0.0.0) made every model server
+# reachable from the LAN (cafe Wi-Fi, hotel, demo venue) without
+# auth — anyone on the same network could submit prompts and exhaust
+# the M2 Max. Set LLAMA_BIND_HOST=0.0.0.0 explicitly in your shell
+# if you really need LAN access (e.g. testing from a second machine).
+LLAMA_BIND_HOST="${LLAMA_BIND_HOST:-127.0.0.1}"
+
+# PER-109: list of every PID file this script manages, so the
+# pre-flight sweep below can purge stale entries for services that
+# might not actually start on this invocation (e.g. chat-model GGUF
+# absent, grounder not configured). ``already_running`` already
+# cleans up at the per-service check, but only for services we go on
+# to launch — a missing chat model would leave ta-llama-chat.pid
+# pointing at a long-dead PID forever.
+MANAGED_PIDFILES=(
+  "$PIDDIR/ta-llama-chat.pid"
+  "$PIDDIR/ta-llama-grounder.pid"
+  "$PIDDIR/ta-llama-embed.pid"
+  "$PIDDIR/ta-llama-rag.pid"
+  "$PIDDIR/ta-llama-rerank.pid"
+  "$PIDDIR/ta-worker.pid"
+  "$PIDDIR/ta-filebeat-bouncer.pid"
+)
+for pf in "${MANAGED_PIDFILES[@]}"; do
+  if [[ -f "$pf" ]]; then
+    pid=$(<"$pf")
+    if ! kill -0 "$pid" 2>/dev/null; then
+      rm -f "$pf"
+    fi
+  fi
+done
+
 # Load .env for WORKER_TOKEN
 if [[ -f .env ]]; then
   set -a
@@ -148,7 +181,7 @@ if echo "$CHAT_CFG_JSON" | python3 -c 'import sys, json; json.loads(sys.stdin.re
         $MMPROJ_FLAG \
         $IMG_MIN_FLAG \
         $REASONING_FLAG \
-        --host 0.0.0.0 --port 8080 \
+        --host "$LLAMA_BIND_HOST" --port 8080 \
         --ctx-size "$CHAT_CTX" --n-gpu-layers 99 \
         --alias chat --jinja
   fi
@@ -171,7 +204,7 @@ else
       llama-server \
         --model "$GEMMA_LEGACY" \
         $MMPROJ_FLAG \
-        --host 0.0.0.0 --port 8080 \
+        --host "$LLAMA_BIND_HOST" --port 8080 \
         --ctx-size 32768 --n-gpu-layers 99 \
         --chat-template chatml \
         --alias chat
@@ -230,7 +263,7 @@ if echo "$GRD_CFG_JSON" | python3 -c 'import sys, json; json.loads(sys.stdin.rea
         $GRD_MMPROJ_FLAG \
         $GRD_IMG_MIN_FLAG \
         --reasoning off \
-        --host 0.0.0.0 --port "$GRD_PORT" \
+        --host "$LLAMA_BIND_HOST" --port "$GRD_PORT" \
         --ctx-size "$GRD_CTX" --n-gpu-layers 99 \
         --alias grounder --jinja
   fi
@@ -245,7 +278,7 @@ if [[ -f "$EMBED_GGUF" ]]; then
     "$PIDDIR/ta-llama-embed.pid" "$LOGDIR/ta-llama-embed.log" \
     llama-server \
       --model "$EMBED_GGUF" \
-      --host 0.0.0.0 --port 8082 \
+      --host "$LLAMA_BIND_HOST" --port 8082 \
       --embeddings --pooling last \
       --ubatch-size 8192 --batch-size 8192 --ctx-size 32768 \
       --n-gpu-layers 99 \
@@ -262,7 +295,7 @@ if [[ -f "$RAG_LLM_GGUF" ]]; then
     "$PIDDIR/ta-llama-rag.pid" "$LOGDIR/ta-llama-rag.log" \
     llama-server \
       --model "$RAG_LLM_GGUF" \
-      --host 0.0.0.0 --port 8083 \
+      --host "$LLAMA_BIND_HOST" --port 8083 \
       --ctx-size 32768 --n-gpu-layers 99 \
       --chat-template chatml \
       --alias rag-chat
@@ -278,7 +311,7 @@ if [[ -f "$RERANKER_GGUF" ]]; then
     "$PIDDIR/ta-llama-rerank.pid" "$LOGDIR/ta-llama-rerank.log" \
     llama-server \
       --model "$RERANKER_GGUF" \
-      --host 0.0.0.0 --port 8084 \
+      --host "$LLAMA_BIND_HOST" --port 8084 \
       --reranking --pooling rank \
       --ctx-size 8192 --n-gpu-layers 99 \
       --alias reranker
