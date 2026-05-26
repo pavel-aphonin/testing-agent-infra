@@ -148,7 +148,16 @@ if echo "$CHAT_CFG_JSON" | python3 -c 'import sys, json; json.loads(sys.stdin.re
   CHAT_MMPROJ=$(echo "$CHAT_CFG_JSON" | python3 -c 'import sys,json,os;p=json.load(sys.stdin).get("mmproj_path");print((p or "").replace("/var/lib/llm-models",os.environ["MODELS_DIR"]))' )
   CHAT_CTX=$(echo "$CHAT_CFG_JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("max_context_tokens") or 32768)')
   CHAT_IMG_MIN=$(echo "$CHAT_CFG_JSON" | python3 -c 'import sys,json;v=json.load(sys.stdin).get("image_min_tokens");print(v if v else "")')
-  CHAT_THINKING=$(echo "$CHAT_CFG_JSON" | python3 -c 'import sys,json;v=json.load(sys.stdin).get("supports_thinking");print("on" if v else "off")')
+  # PER-165: ``supports_thinking`` arrives as a Python truthiness:
+  # ``True`` → model is built to use the reasoning channel and the
+  # worker is expected to handle ``reasoning_content`` separately;
+  # ``False`` (or missing) → collapse thinking back into ``content``
+  # so the JSON-schema parse sees actual tokens instead of an empty
+  # string. The 3-way ``--reasoning on/off/auto`` switch on
+  # llama-server is too literal — when ``supports_thinking=True``
+  # we want llama-server's *default* behaviour (whatever the chat
+  # template prescribes), not a forced override.
+  CHAT_THINKING_RAW=$(echo "$CHAT_CFG_JSON" | python3 -c 'import sys,json;v=json.load(sys.stdin).get("supports_thinking");print("true" if v else "false")')
   echo "  ✓ Chat model from backend: $CHAT_NAME"
 
   MMPROJ_FLAG=""
@@ -161,15 +170,26 @@ if echo "$CHAT_CFG_JSON" | python3 -c 'import sys, json; json.loads(sys.stdin.re
     IMG_MIN_FLAG="--image-min-tokens $CHAT_IMG_MIN"
     echo "    Grounding budget: --image-min-tokens $CHAT_IMG_MIN"
   fi
-  # PER-165: honour supports_thinking passport. When the chat
-  # template auto-enables thinking mode (Gemma 4, Qwen 3.5/3.6,
-  # DeepSeek-R1 family) and the worker isn't built to extract
-  # ``reasoning_content``, generated tokens vanish into the
-  # thinking channel and ``content`` arrives empty — worker logs
-  # ``llm_no_decision`` even though the model actually answered.
-  # ``--reasoning off`` collapses thinking back into ``content``.
-  REASONING_FLAG="--reasoning $CHAT_THINKING"
-  echo "    Thinking mode: $CHAT_THINKING (from passport)"
+  # PER-165 v2: bind thinking-channel behaviour to the passport.
+  # When the chat template auto-enables thinking mode (Gemma 4,
+  # Qwen 3.5/3.6, DeepSeek-R1 family) and the worker isn't built
+  # to extract ``reasoning_content``, generated tokens vanish into
+  # the thinking channel and ``content`` arrives empty — worker
+  # logs ``llm_no_decision`` even though the model actually
+  # answered. ``--reasoning off`` collapses thinking back into
+  # ``content`` and makes such models work out of the box.
+  #
+  # For ``supports_thinking=True`` we deliberately emit NO flag —
+  # llama-server's default ``auto`` keeps the chat template's own
+  # decision, which is what the operator opted into by setting the
+  # passport bit.
+  REASONING_FLAG=""
+  if [[ "$CHAT_THINKING_RAW" == "false" ]]; then
+    REASONING_FLAG="--reasoning off"
+    echo "    Thinking: collapsed to content (--reasoning off, passport supports_thinking=false)"
+  else
+    echo "    Thinking: passport supports_thinking=true → leaving llama-server default"
+  fi
 
   if [[ ! -f "$CHAT_GGUF" ]]; then
     echo "  ⚠ Chat GGUF not on disk: $CHAT_GGUF — skipping :8080"
