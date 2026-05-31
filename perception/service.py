@@ -169,6 +169,90 @@ def compare(req: CompareRequest) -> CompareResponse:
 
 
 # ─────────────────────────────────────────────────────────────────────
+# Vision screen-type classification — SigLIP2 zero-shot (PER-175 Phase B)
+# ─────────────────────────────────────────────────────────────────────
+#
+# The blindness fix. The old Context Identifier classified screen TYPE
+# from AX-tree TEXT (DeBERTa), which is empty on canvas/Flutter screens
+# (run cccc3333: a PIN keypad read as "money transfer"). SigLIP2 matches
+# the SCREENSHOT against candidate type descriptions — it sees the keypad.
+#
+# SigLIP uses a sigmoid image-text objective; for picking the best label
+# we rank by image·text cosine and also return a calibrated 0..1 score so
+# the caller can gate on confidence.
+
+def _text_embed(labels: list[str]) -> torch.Tensor:
+    model, processor = _siglip()
+    inputs = processor(
+        text=labels, return_tensors="pt", padding="max_length", truncation=True
+    ).to(DEVICE)
+    with torch.no_grad():
+        feats = model.get_text_features(**inputs)
+    if not isinstance(feats, torch.Tensor):
+        for attr in ("pooler_output", "text_embeds", "last_hidden_state"):
+            val = getattr(feats, attr, None)
+            if isinstance(val, torch.Tensor):
+                feats = val
+                break
+        else:
+            feats = feats[0]
+        if feats.dim() == 3:
+            feats = feats.mean(dim=1)
+    return torch.nn.functional.normalize(feats, dim=-1)
+
+
+# Screen-type taxonomy as natural-language descriptions SigLIP can match a
+# screenshot against. Returned ``screen_type`` is the short key (left of
+# the colon); the description (right) is what's embedded. RU+EN phrasing
+# because the app under test is Russian. Caller may override.
+DEFAULT_SCREEN_TYPES: dict[str, str] = {
+    "pin_entry": "a numeric PIN code entry screen with an on-screen keypad of digit buttons",
+    "sms_entry": "a screen to enter an SMS one-time confirmation code",
+    "login": "a login screen with a phone number or username input field",
+    "password_entry": "a screen with a password input field",
+    "home": "the main home dashboard screen of a banking app",
+    "payment": "a money transfer or payment screen",
+    "transactions": "a list of transactions or operation history",
+    "settings": "an app settings screen",
+    "permission_dialog": "a system permission dialog asking to allow access",
+    "error_dialog": "an error or warning dialog box",
+    "loading": "a loading or splash screen",
+}
+
+
+class ClassifyVisionRequest(BaseModel):
+    png_b64: str
+    # optional override: {short_key: natural-language description}
+    candidate_types: dict[str, str] | None = None
+
+
+class ClassifyVisionResponse(BaseModel):
+    screen_type: str          # short key, e.g. "pin_entry"
+    confidence: float         # 0..1, softmax over matched labels
+    all_scores: dict[str, float]
+
+
+@app.post("/classify_vision", response_model=ClassifyVisionResponse)
+def classify_vision(req: ClassifyVisionRequest) -> ClassifyVisionResponse:
+    types = req.candidate_types or DEFAULT_SCREEN_TYPES
+    keys = list(types.keys())
+    descriptions = [types[k] for k in keys]
+
+    img = _img_embed(base64.b64decode(req.png_b64))   # [1, dim], normalized
+    txt = _text_embed(descriptions)                    # [N, dim], normalized
+    sims = (img @ txt.T).squeeze(0)                     # [N] cosine sims
+    # softmax for a calibrated, comparable confidence across labels
+    probs = torch.softmax(sims, dim=-1)
+    best = int(torch.argmax(probs).item())
+    all_scores = {keys[i]: float(probs[i].item()) for i in range(len(keys))}
+    return ClassifyVisionResponse(
+        screen_type=keys[best],
+        confidence=float(probs[best].item()),
+        all_scores=all_scores,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
 # Screen Parser — OmniParser-v2 (lazy; heavy deps)
 # ─────────────────────────────────────────────────────────────────────
 
